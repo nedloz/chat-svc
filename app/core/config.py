@@ -19,9 +19,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://redis:6379/0"
 
     auth_profile_url: str = "http://auth-svc:3000/api/auth/users/{user_id}/profile"
-    rag_url: str = "http://rag-svc:3245/api/rag/query"
-    rag_periodic_url: str = "http://rag-svc:3245/api/rag/query"
-    llm_stream_url: str = "http://llm-svc:4000/generate"
+    llm_stream_url: str = "http://graph-rag-svc:8000/generate"
+    llm_cancel_url: str = "http://graph-rag-svc:8000/cancel"
 
     trusted_service_tokens: str = "{}"
 
@@ -33,11 +32,13 @@ class Settings(BaseSettings):
     redis_connection_ttl_sec: int = 600
     redis_recent_messages_limit: int = 20
     redis_recent_messages_ttl_sec: int = 86400
-    rag_periodic_interval_days: int = 20
-    rag_periodic_messages_limit: int = 10
 
     history_page_size_default: int = 20
     history_page_size_max: int = 50
+
+    # Сколько последних реплик сессии уходит в graph-rag-svc вместе с вопросом.
+    # Сервис ограничивает историю ещё и по объёму символов на своей стороне.
+    llm_history_messages: int = 20
 
     stream_db_flush_every_chars: int = 120
     stream_db_flush_every_ms: int = 400

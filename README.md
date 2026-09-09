@@ -22,6 +22,27 @@ X-User-Id: <user_uuid>
 
 ---
 
+## ⚠️ Миграция на graph-RAG: статус
+
+`rag-svc` и `llm-svc` заменены одним сервисом — `services/graph-rag-svc` (ретривал: граф + векторный fallback, и генерация ответа). Код и разделы этого README актуализированы под новую схему; упоминания `rag-svc`/`llm-svc`, оставшиеся ниже, — это исторический контекст («что было раньше»), а не описание текущего поведения.
+
+Что изменилось после переключения:
+
+- **Periodic history sync удалён полностью.** Метод `_maybe_submit_periodic_history`, его точка вызова и redis-гейт `periodic_rag_gate` вырезаны: контракт (`"type": "periodic_session_history"`) не поддерживался ни одной стороной, а сама функция признана ненужной.
+- **История сессии теперь передаётся** в `/generate` полем `history` (последние `LLM_HISTORY_MESSAGES` непустых реплик, собираются до создания новых сообщений). Без неё graph-rag-svc не мог разрешать уточняющие вопросы.
+- **Появилась отмена генерации:** WS-команда `cancel` от клиента → `POST /cancel` в graph-rag-svc → событие `message_cancelled` обратно по мосту.
+- **Payload `/generate` изменился:** chat-специфичные идентификаторы уехали в объект `delivery`, добавлен `response_mode: "ws_bridge"`. Это сделано ради второго потребителя сервиса — Telegram-бота соседней команды, которому нужен синхронный ответ.
+
+Архитектура и план миграции целиком — в README сервиса `services/graph-rag-svc`.
+
+> **Важно:** `graph-rag-svc` — общий модуль двух команд (наш веб-чат и Telegram-бот соседнего
+> проекта, у которого нет ни микросервисов, ни WebSocket между сервисами). Поэтому контракт
+> `/generate` двухрежимный: `chat-svc` всегда шлёт `response_mode: "ws_bridge"` и объект
+> `delivery`, а бот использует `sync` и получает готовый ответ в HTTP-ответе. Различия
+> проектов, компромисс и модель владения — разделы 10-13 README `graph-rag-svc`.
+
+---
+
 # 2. Что представляет собой chat-svc
 
 Сервис можно рассматривать как **оркестратор пользовательского чата**.
@@ -48,10 +69,8 @@ X-User-Id: <user_uuid>
                         |
                         |
                         v
-                     RAG
-                      |
-                      v
-                     LLM
+                graph-rag-svc
+              (ретривал + генерация)
                       |
               streaming events
                       |
@@ -67,8 +86,7 @@ X-User-Id: <user_uuid>
 * `auth-svc` предоставляет профиль пользователя;
 * Redis используется для кеша и временного состояния realtime-операций;
 * PostgreSQL хранит постоянные данные;
-* `rag-svc` отвечает за retrieval;
-* `llm-svc` генерирует ответ;
+* `graph-rag-svc` отвечает и за retrieval (граф знаний + векторный fallback), и за генерацию ответа — один сервис вместо прежней связки `rag-svc`+`llm-svc`;
 * `chat-svc` связывает весь pipeline и отдаёт результат клиенту.
 
 ---
@@ -93,7 +111,8 @@ X-User-Id: <user_uuid>
 * кеширует последние сообщения;
 * принимает feedback на ответы;
 * хранит RAG metadata и retrieval statistics;
-* поддерживает periodic session history sync;
+* передаёт историю сессии вместе с вопросом;
+* поддерживает отмену генерации пользователем;
 * поддерживает несколько WebSocket-подключений одной session;
 * хранит временное состояние незавершённых LLM requests в Redis;
 * предоставляет внутренний WebSocket для событий от LLM;
@@ -178,13 +197,14 @@ GET /healthz
 
 После установки WebSocket-соединения клиент отправляет JSON-сообщения.
 
-Текущая реализация поддерживает четыре типа:
+Текущая реализация поддерживает пять типов:
 
 ```text
 ping
 history_get
 feedback_set
 question
+cancel
 ```
 
 Они определены непосредственно в WebSocket schemas.
@@ -235,10 +255,10 @@ Request:
 
 Поля:
 
-| Поле                | Тип       | Описание                                     |
-| ------------------- | --------- | -------------------------------------------- |
-| `type`              | string    | `history_get`                                |
-| `limit`             | integer   | Количество сообщений                         |
+| Поле              | Тип    | Описание                                                              |
+| --------------------- | --------- | ----------------------------------------------------------------------------- |
+| `type`              | string    | `history_get`                                                               |
+| `limit`             | integer   | Количество сообщений                                       |
 | `before_message_id` | UUID/null | Cursor для загрузки предыдущей части истории |
 
 Schema по умолчанию устанавливает `limit = 20`.
@@ -343,26 +363,15 @@ content
 
 ---
 
-### Шаг 2. Periodic history sync
+### Шаг 2. Сбор истории сессии
 
-Перед обработкой нового вопроса сервис проверяет, нужно ли выполнить periodic отправку истории сессии в RAG.
+Перед созданием новых сообщений сервис забирает последние `LLM_HISTORY_MESSAGES` реплик сессии.
 
-Если periodic gate разрешает выполнение, сервис:
+Порядок важен: история собирается **до** создания текущего вопроса и пустой заготовки ответа, иначе в неё попали бы они сами. Пустые сообщения отбрасываются — заготовка ответа создаётся пустой и заполняется по мере стриминга, поэтому неудавшаяся генерация оставляет в истории пустую строку, которую незачем показывать модели.
 
-* получает историю;
-* получает соответствующие RAG runs;
-* создаёт специальное assistant message;
-* создаёт pending request;
-* формирует periodic payload;
-* отправляет его в RAG.
+Роли `system` в истории не бывает: `graph-rag-svc` её не принимает, поскольку содержимое истории в конечном счёте пишет пользователь.
 
-В payload используется маркер:
-
-```text
-[periodic-session-history-sync]
-```
-
-а также передаются сообщения, RAG runs, профиль пользователя и параметры интервала.
+> Ранее на этом шаге выполнялся periodic history sync — он удалён (раздел 27).
 
 ---
 
@@ -430,9 +439,9 @@ full_text
 
 ---
 
-### Шаг 7. Передача вопроса в RAG
+### Шаг 7. Передача вопроса в graph-rag-svc
 
-После подготовки данных сервис создаёт RAG payload:
+После подготовки данных сервис создаёт payload для генерации:
 
 ```json
 {
@@ -446,15 +455,15 @@ full_text
 }
 ```
 
-и отправляет его в `rag-svc`.
+и отправляет его через `LlmService.enqueue_answer()` на `POST /generate` сервиса `graph-rag-svc` (ретривал — граф знаний + векторный fallback — выполняется уже внутри `graph-rag-svc`, а не отдельным сервисом до этого вызова).
 
-Таким образом, `chat-svc` передаёт RAG не только текст вопроса, но и контекст пользователя и identifiers текущего chat request.
+Таким образом, `chat-svc` передаёт не только текст вопроса, но и контекст пользователя и identifiers текущего chat request.
 
 ---
 
 # 13. Подтверждение принятия вопроса
 
-После ответа RAG frontend получает:
+После ответа `graph-rag-svc` frontend получает:
 
 ```json
 {
@@ -505,7 +514,7 @@ message_error
 Используются service headers:
 
 ```http
-X-Service-Name: llm-svc
+X-Service-Name: graph-rag-svc
 X-Service-Token: <service-token>
 ```
 
@@ -745,7 +754,6 @@ Redis в `chat-svc` используется не только как обычн
 * connection state;
 * recent messages;
 * pending LLM requests;
-* periodic RAG gate;
 * состояние streaming.
 
 Таким образом, Redis является частью runtime архитектуры сервиса, а не необязательной оптимизацией.
@@ -778,59 +786,90 @@ PostgreSQL используется для постоянного хранени
 
 ---
 
-# 26. RAG integration
+# 26. graph-rag-svc integration
 
-Основной вопрос передаётся в `rag-svc`.
+Основной вопрос передаётся в `graph-rag-svc` (ретривал + генерация в одном сервисе, заменившем `rag-svc`+`llm-svc`).
 
-Фактический вызов выполняется из `_handle_question()`:
+Фактический вызов выполняется из `_handle_question()`, через `LlmService.enqueue_answer()`:
 
 ```text
 chat-svc
    |
-   | POST RAG_URL
+   | POST LLM_STREAM_URL (graph-rag-svc's /generate)
    v
-rag-svc
+graph-rag-svc
 ```
 
-Payload содержит:
+Payload:
 
-```text
-request_id
-message_id
-assistant_message_id
-session_id
-user_id
-question
-profile
+```jsonc
+{
+  "request_id": "...",
+  "session_id": "...",
+  "user_id": "...",
+  "question": "текст вопроса",
+  "profile": { ... },
+  "history": [ {"role": "user", "content": "..."}, ... ],
+  "response_mode": "ws_bridge",
+  "delivery": {
+    "assistant_message_id": "...",
+    "message_id": "..."
+  }
+}
 ```
 
-Это означает, что RAG получает не только вопрос, но и необходимый контекст конкретной сессии и пользователя.
+Особенности:
+
+* **`response_mode: "ws_bridge"`** — ответ придёт не в HTTP-ответе, а потоком через `/ws/internal/llm`. Второй режим (`sync`) существует для Telegram-бота соседней команды, `chat-svc` его не использует.
+* **`delivery`** — идентификаторы, нужные только для маршрутизации этого потока. Вынесены из корня запроса, чтобы потребителям без `chat-svc` не приходилось придумывать первичные ключи нашей схемы `chat`.
+* **`history`** — последние `LLM_HISTORY_MESSAGES` непустых реплик сессии, собранные **до** создания текущих сообщений. Без них graph-rag-svc не может разрешать уточняющие вопросы: он использует историю и в промпте, и при извлечении сущностей из вопроса.
+
+Сам ретривал (граф или векторный) `graph-rag-svc` выполняет самостоятельно, до генерации ответа. Если ретривал не удался, ответа не будет вообще — придёт `message_error`: ответ без опоры на документы считается хуже честной ошибки.
 
 ---
 
-# 27. Periodic RAG history sync
+# 27. Отмена генерации
 
-Помимо обычного retrieval для вопроса, `chat-svc` поддерживает periodic synchronization истории.
+Пользователь может остановить генерацию ответа. Клиент отправляет:
 
-Перед обработкой вопроса сервис проверяет Redis gate.
-
-Если период истёк, он:
-
-1. получает историю;
-2. получает существующие RAG runs;
-3. формирует periodic payload;
-4. отправляет его в RAG;
-5. создаёт соответствующий pending assistant message.
-
-Для этого используется:
-
-```text
-RAG_PERIODIC_URL
-RAG_PERIODIC_INTERVAL_DAYS
-RAG_PERIODIC_MESSAGES_LIMIT
+```json
+{
+  "type": "cancel",
+  "request_id": "<тот же request_id, что был у вопроса>"
+}
 ```
 
-Это позволяет передавать RAG дополнительный контекст накопленной истории сессии.
+`chat-svc` отвечает подтверждением приёма и переадресует запрос в `graph-rag-svc`:
+
+```text
+клиент → chat-svc (WS "cancel")
+            |
+            | POST LLM_CANCEL_URL (graph-rag-svc's /cancel)
+            v
+       graph-rag-svc
+            |
+            | message_cancelled по /ws/internal/llm
+            v
+         chat-svc → клиент
+```
+
+Ответ клиенту на саму команду:
+
+```json
+{ "type": "cancel_accepted", "request_id": "...", "status": "cancelling" }
+```
+
+Если задание уже успело завершиться, `graph-rag-svc` вернёт 404, а клиент получит `status: "not_found"` — для пользователя это не ошибка.
+
+Отмена **кооперативная**: генерация останавливается между фрагментами, поэтому уже накопленный текст сохраняется в сообщении, а не теряется. По событию `message_cancelled` сервис дописывает частичный текст в БД и рассылает клиентам:
+
+```json
+{ "type": "message_cancelled", "request_id": "...", "assistant_message_id": "..." }
+```
+
+Это отдельный тип события, а не `error`: остановка по инициативе пользователя не является сбоем и показывается в интерфейсе иначе.
+
+> **Удалено:** прежний periodic history sync (`_maybe_submit_periodic_history`, Redis-гейт `periodic_rag_gate`) вырезан полностью — его контракт (`"type": "periodic_session_history"`) не поддерживался ни одной стороной, а сама функция признана ненужной. Контекст сессии теперь передаётся полем `history` при каждом вопросе (раздел 26).
 
 ---
 
@@ -863,7 +902,7 @@ chat-svc
                             Redis
 ```
 
-Профиль используется при формировании RAG payload и в дальнейшем AI pipeline.
+Профиль используется при формировании payload для `graph-rag-svc` и в дальнейшем AI pipeline.
 
 ---
 
@@ -885,8 +924,8 @@ Frontend не должен использовать этот механизм н
 Он предназначен для:
 
 * `chat-svc → auth-svc`;
-* `chat-svc → rag-svc`;
-* `llm-svc → chat-svc`.
+* `chat-svc → graph-rag-svc` (HTTP `/generate`);
+* `graph-rag-svc → chat-svc` (internal WS `/ws/internal/llm`).
 
 ---
 
@@ -933,12 +972,10 @@ Frontend не должен использовать этот механизм н
       v
 3. chat-svc
       |
-      | RAG request
+      | POST /generate
       v
-4. rag-svc
-      |
-      v
-5. LLM
+4. graph-rag-svc
+      | (ретривал: граф + векторный fallback, затем генерация)
       |
       | generation_started
       | stream_chunk
@@ -946,11 +983,11 @@ Frontend не должен использовать этот механизм н
       | stream_chunk
       | message_completed
       v
-6. chat-svc
+5. chat-svc
       |
       | streaming events
       v
-7. Frontend
+6. Frontend
 ```
 
 Параллельно сервис сохраняет состояние в Redis и PostgreSQL.
@@ -997,10 +1034,9 @@ latency
 Упрощённо:
 
 ```text
-auth-svc      → Кто пользователь?
-rag-svc       → Какой контекст найти?
-llm-svc       → Как сгенерировать ответ?
-chat-svc      → Как связать всё это в пользовательский чат?
+auth-svc        → Кто пользователь?
+graph-rag-svc   → Какой контекст найти и как сгенерировать ответ?
+chat-svc        → Как связать всё это в пользовательский чат?
 ```
 
 Текущий README прямо описывает `chat-svc` как WebSocket gateway for chat.
@@ -1017,9 +1053,9 @@ chat-svc      → Как связать всё это в пользовател�
 
 CRUD REST API для chat sessions или messages в текущем сервисе нет. Операции выполняются через WebSocket protocol.
 
-### RAG и LLM разделены
+### Ретривал и генерация — в одном сервисе, `chat-svc` их не различает
 
-`chat-svc` отправляет retrieval request в RAG, а streaming events получает от LLM через internal event channel.
+`chat-svc` отправляет запрос в `graph-rag-svc` (`POST /generate`) и получает streaming events обратно через internal event channel (`/ws/internal/llm`) — какой именно способ ретривала (граф или векторный) был использован, `chat-svc` не касается, это внутренняя логика `graph-rag-svc`.
 
 ### `generation_started` не содержит отдельной логики
 
@@ -1054,9 +1090,9 @@ CRUD REST API для chat sessions или messages в текущем серви�
         ↓
 сохраняет сообщение
         ↓
-отправляет вопрос в RAG
+отправляет вопрос в graph-rag-svc
         ↓
-получает события от LLM
+получает события от graph-rag-svc
         ↓
 передаёт streaming frontend
         ↓
@@ -1073,6 +1109,6 @@ CRUD REST API для chat sessions или messages в текущем серви�
 /ws/chat
 ```
 
-а `chat-svc` скрывает внутреннюю сложность взаимодействия с `auth-svc`, `rag-svc`, `llm-svc`, Redis и PostgreSQL.
+а `chat-svc` скрывает внутреннюю сложность взаимодействия с `auth-svc`, `graph-rag-svc`, Redis и PostgreSQL.
 
 Таким образом, в общей архитектуре системы `chat-svc` является **оркестратором пользовательского AI-диалога и владельцем chat runtime/history**, тогда как специализированные сервисы отвечают за identity, retrieval и генерацию.

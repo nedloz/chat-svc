@@ -29,6 +29,9 @@ class InternalLlmEventService:
         if event_type == "message_completed":
             await self._handle_completed(event)
             return
+        if event_type == "message_cancelled":
+            await self._handle_cancelled(event)
+            return
         if event_type == "message_error":
             await self._handle_error(event)
             return
@@ -106,6 +109,35 @@ class InternalLlmEventService:
 
         await self._broadcast(session_id, {
             "type": "message_completed",
+            "request_id": event.get("request_id"),
+            "assistant_message_id": str(assistant_message_id),
+        })
+        await self.cache.delete_pending_request(assistant_message_id)
+
+    async def _handle_cancelled(self, event: dict[str, Any]) -> None:
+        """Генерацию остановил пользователь.
+
+        Уже накопленный текст сохраняется как есть — это не ошибка и не пустой ответ,
+        поэтому клиенту уходит отдельный тип события, а не `error`.
+        """
+        session_id = uuid.UUID(event["session_id"])
+        assistant_message_id = uuid.UUID(event["assistant_message_id"])
+        pending = await self.cache.get_pending_request(assistant_message_id) or {}
+        full_text = pending.get("full_text") or ""
+        started_at = pending.get("started_at") or time.perf_counter()
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
+
+        async with SessionLocal() as db:
+            await self.message_service.update_message_content(
+                db,
+                session_id=session_id,
+                message_id=assistant_message_id,
+                content=full_text,
+                latency_ms=latency_ms,
+            )
+
+        await self._broadcast(session_id, {
+            "type": "message_cancelled",
             "request_id": event.get("request_id"),
             "assistant_message_id": str(assistant_message_id),
         })

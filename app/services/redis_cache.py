@@ -30,10 +30,6 @@ def pending_request_key(assistant_message_id: uuid.UUID) -> str:
     return f'chat:pending:{assistant_message_id}'
 
 
-def periodic_rag_gate_key(session_id: uuid.UUID) -> str:
-    return f'chat:session:{session_id}:periodic_rag_gate'
-
-
 class RedisCacheService:
     async def cache_profile(self, user_id: uuid.UUID, profile: dict[str, Any]) -> None:
         await redis_client.setex(profile_key(user_id), settings.redis_profile_ttl_sec, json.dumps(profile))
@@ -107,11 +103,3 @@ class RedisCacheService:
 
     async def delete_pending_request(self, assistant_message_id: uuid.UUID) -> None:
         await redis_client.delete(pending_request_key(assistant_message_id))
-
-    async def try_acquire_periodic_rag_gate(self, session_id: uuid.UUID, interval_days: int) -> bool:
-        ttl_sec = max(1, int(interval_days)) * 24 * 60 * 60
-        result = await redis_client.set(periodic_rag_gate_key(session_id), "1", ex=ttl_sec, nx=True)
-        return bool(result)
-
-    async def clear_periodic_rag_gate(self, session_id: uuid.UUID) -> None:
-        await redis_client.delete(periodic_rag_gate_key(session_id))
