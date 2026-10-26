@@ -1140,7 +1140,7 @@ nginx пробрасывает его вместо заголовков, а се
 
 ## Вызовы других сервисов по mTLS
 
-Так chat-svc вызывает graph-rag-svc (`/generate`, `/cancel`).
+Так chat-svc вызывает graph-rag-svc (`/generate`, `/cancel`) и auth-svc (внутренний профиль пользователя `/internal/users/{id}/profile`). Сам chat-svc при включённом mTLS слушает только `127.0.0.1`, а наружу смотрит прокси на порту 8443: он пропускает шлюз (WebSocket `/ws/chat`) и graph-rag-svc (внутренний WebSocket `/ws/internal/llm`).
 
 Если заданы `SERVICE_MTLS_CERT`, `SERVICE_MTLS_KEY` и `SERVICE_MTLS_CA`, сервис предъявляет свой
 сертификат внутреннего CA (CN равен имени сервиса) и проверяет сервер. Контекст TLS собирается в

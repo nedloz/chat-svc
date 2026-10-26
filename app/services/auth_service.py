@@ -2,6 +2,7 @@ import httpx
 
 from app.core.config import settings
 from app.core.internal_auth import get_internal_auth_headers
+from app.mtls import httpx_kwargs
 
 
 class AuthService:
@@ -11,7 +12,7 @@ class AuthService:
         headers = get_internal_auth_headers()
 
         timeout = httpx.Timeout(settings.http_timeout_sec)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, **httpx_kwargs()) as client:
             response = await client.get(url, headers=headers)
             response.raise_for_status()
             return response.json()
