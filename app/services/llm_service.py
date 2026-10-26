@@ -4,6 +4,7 @@ import httpx
 
 from app.core.config import settings
 from app.core.internal_auth import get_internal_auth_headers
+from app.mtls import httpx_kwargs
 
 
 class LlmService:
@@ -14,7 +15,7 @@ class LlmService:
         поэтому наверх поднимается как обычный результат, а не исключение.
         """
         headers = get_internal_auth_headers()
-        async with httpx.AsyncClient(timeout=settings.http_timeout_sec) as client:
+        async with httpx.AsyncClient(timeout=settings.http_timeout_sec, **httpx_kwargs()) as client:
             response = await client.post(settings.llm_cancel_url, json={"request_id": request_id}, headers=headers)
             if response.status_code == 404:
                 return {"status": "not_found"}
@@ -23,7 +24,7 @@ class LlmService:
 
     async def enqueue_answer(self, payload: dict[str, Any]) -> dict[str, Any]:
         headers = get_internal_auth_headers()
-        async with httpx.AsyncClient(timeout=settings.http_timeout_sec) as client:
+        async with httpx.AsyncClient(timeout=settings.http_timeout_sec, **httpx_kwargs()) as client:
             response = await client.post(settings.llm_stream_url, json=payload, headers=headers)
             response.raise_for_status()
             return response.json()
