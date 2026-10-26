@@ -4,11 +4,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
     service_name: str = "chat-svc"
-    service_token: str = "change-me"
 
-    internal_auth_enabled: bool = True
-    internal_auth_header_name: str = "X-Service-Token"
-    internal_service_name_header: str = "X-Service-Name"
+    internal_auth_mode: str = "mtls"
 
     app_name: str = "chat-svc"
     app_host: str = "0.0.0.0"
@@ -21,8 +18,6 @@ class Settings(BaseSettings):
     auth_profile_url: str = "http://auth-svc:3000/api/auth/users/{user_id}/profile"
     llm_stream_url: str = "http://graph-rag-svc:8000/generate"
     llm_cancel_url: str = "http://graph-rag-svc:8000/cancel"
-
-    trusted_service_tokens: str = "{}"
 
     user_id_header_name: str = "x-user-id"
 
