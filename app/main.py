@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
@@ -10,6 +11,7 @@ from app.db.session import redis_client
 from app.ws.handler import handler
 
 configure_logging()
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -47,7 +49,13 @@ async def internal_llm_ws(websocket: WebSocket) -> None:
     await websocket.send_json({"type": "ready", "service": service_name or "llm"})
     try:
         while True:
-            payload = await websocket.receive_json()
+            try:
+                payload = await websocket.receive_json()
+            except WebSocketDisconnect:
+                raise
+            except ValueError:
+                logger.warning("Внутренний WebSocket: получен не-JSON кадр, пропущен")
+                continue
             await handler.internal_llm_event_service.handle_event(payload)
     except WebSocketDisconnect:
         return
