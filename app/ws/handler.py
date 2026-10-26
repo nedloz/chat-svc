@@ -6,6 +6,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import user_context
 from app.core.config import settings
 from app.db.repositories.message_repo import MessageRepository
 from app.db.session import SessionLocal
@@ -37,7 +38,12 @@ class ChatWebSocketHandler:
         self.internal_llm_event_service = InternalLlmEventService(self.cache, self.message_service)
 
     async def handle(self, websocket: WebSocket, token: str | None = None) -> None:
-        resolved_user_id = self._extract_user_id(websocket, token)
+        try:
+            resolved_user_id = self._extract_user_id(websocket, token)
+        except ValueError as exc:
+            logger.warning("websocket rejected: %s", exc)
+            await websocket.close(code=1008)
+            return
         profile = await self.cache.get_profile(resolved_user_id)
         if profile is None:
             profile = await self.auth_service.get_profile(resolved_user_id)
@@ -158,14 +164,22 @@ class ChatWebSocketHandler:
                 await self.cache.unregister_connection(connection_id, session_id)
 
     def _extract_user_id(self, websocket: WebSocket, token: str | None) -> uuid.UUID:
-        _ = token  # token is validated by nginx during websocket handshake
-        candidate = websocket.headers.get(settings.user_id_header_name)
-        if not candidate:
-            raise ValueError(
-                f"Missing user id in forwarded header {settings.user_id_header_name}. "
-                "Ensure nginx validates ?token=... and injects user id header."
-            )
-        return uuid.UUID(str(candidate))
+        _ = token  # токен клиента проверяет nginx при рукопожатии (auth_request)
+        # Пользователь берётся из подписанного контекста, который выпустил auth-svc для chat-svc
+        # (app/user_context.py), а не из голого заголовка: тот мог выставить любой контейнер сети.
+        signed = websocket.headers.get(user_context.HEADER)
+        if signed:
+            try:
+                return uuid.UUID(user_context.verify_from_env(signed).user_id)
+            except user_context.UserContextError as exc:
+                raise ValueError(f"Invalid user context: {exc}") from exc
+        # Переходный режим (USER_CONTEXT_ALLOW_LEGACY): прежний заголовок без подписи.
+        legacy = websocket.headers.get(settings.user_id_header_name)
+        if legacy and user_context.allow_legacy():
+            return uuid.UUID(str(legacy))
+        raise ValueError(
+            f"Missing {user_context.HEADER}. Ensure nginx validates ?token=... and forwards the signed user context."
+        )
 
     async def _handle_question(
         self,

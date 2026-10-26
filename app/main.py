@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 
 from app.core.config import settings
+from app import user_context
 from app.core.internal_auth import validate_trusted_tokens, verify_internal_websocket
 from app.core.logging import configure_logging
 from app.db.session import redis_client
@@ -14,6 +15,8 @@ configure_logging()
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     validate_trusted_tokens()
+    # Без ключа проверки подписи контекст пользователя принять нельзя: сервис не стартует.
+    user_context.check_configuration()
     yield
     await redis_client.aclose()
 
