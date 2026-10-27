@@ -2,6 +2,7 @@ import json
 import uuid
 from typing import Any
 
+from app.metrics import REDIS_CACHE_REQUESTS
 from app.core.config import settings
 from app.db.session import redis_client
 
@@ -36,6 +37,7 @@ class RedisCacheService:
 
     async def get_profile(self, user_id: uuid.UUID) -> dict[str, Any] | None:
         raw = await redis_client.get(profile_key(user_id))
+        REDIS_CACHE_REQUESTS.labels(kind="profile", outcome="hit" if raw else "miss").inc()
         return json.loads(raw) if raw else None
 
     async def cache_session_id(self, user_id: uuid.UUID, session_id: uuid.UUID) -> None:
@@ -43,6 +45,7 @@ class RedisCacheService:
 
     async def get_session_id(self, user_id: uuid.UUID) -> uuid.UUID | None:
         raw = await redis_client.get(session_key(user_id))
+        REDIS_CACHE_REQUESTS.labels(kind="session", outcome="hit" if raw else "miss").inc()
         return uuid.UUID(raw) if raw else None
 
     async def register_connection(self, connection_id: str, user_id: uuid.UUID, session_id: uuid.UUID) -> None:
@@ -66,6 +69,7 @@ class RedisCacheService:
     async def get_recent_messages(self, session_id: uuid.UUID, limit: int) -> list[dict[str, Any]]:
         key = recent_messages_key(session_id)
         raw_items = await redis_client.lrange(key, max(0, -limit), -1)
+        REDIS_CACHE_REQUESTS.labels(kind="recent_messages", outcome="hit" if raw_items else "miss").inc()
         return [json.loads(item) for item in raw_items]
 
     async def append_recent_message(self, session_id: uuid.UUID, message: dict[str, Any]) -> None:

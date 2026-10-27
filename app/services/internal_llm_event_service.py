@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import WebSocket
 
+from app.metrics import ANSWER_DURATION, GENERATION_FAILURES, TIME_TO_FIRST_TOKEN
 from app.db.session import SessionLocal
 from app.db.repositories.rag_run_repo import RagRunRepository
 from app.services.message_service import MessageService
@@ -37,6 +38,7 @@ class InternalLlmEventService:
         try:
             await self._dispatch(event)
         except Exception:
+            GENERATION_FAILURES.labels(reason="internal_error").inc()
             logger.exception(
                 "Не удалось обработать внутреннее событие %s: request_id=%s",
                 event.get("type"),
@@ -96,12 +98,15 @@ class InternalLlmEventService:
         if pending is None:
             logger.warning("Pending request not found for assistant_message_id=%s", assistant_message_id)
             return
+        is_first_chunk = not pending.get("full_text") and bool(event.get("delta"))
         full_text = (pending.get("full_text") or "") + (event.get("delta") or "")
         pending["full_text"] = full_text
         await self.cache.set_pending_request(assistant_message_id, pending)
 
         started_at = pending.get("started_at") or time.perf_counter()
         now = time.perf_counter()
+        if is_first_chunk:
+            TIME_TO_FIRST_TOKEN.observe(now - started_at)
         last_flush_at = pending.get("last_flush_at") or started_at
         if (len(full_text) - int(pending.get("last_flush_len") or 0) >= 120) or ((now - last_flush_at) * 1000 >= 400):
             async with SessionLocal() as db:
@@ -126,6 +131,7 @@ class InternalLlmEventService:
         full_text = pending.get("full_text") or ""
         started_at = pending.get("started_at") or time.perf_counter()
         latency_ms = int((time.perf_counter() - started_at) * 1000)
+        ANSWER_DURATION.labels(outcome="completed").observe(latency_ms / 1000)
 
         async with SessionLocal() as db:
             await self.message_service.update_message_content(
@@ -176,6 +182,7 @@ class InternalLlmEventService:
         full_text = pending.get("full_text") or ""
         started_at = pending.get("started_at") or time.perf_counter()
         latency_ms = int((time.perf_counter() - started_at) * 1000)
+        ANSWER_DURATION.labels(outcome="cancelled").observe(latency_ms / 1000)
 
         async with SessionLocal() as db:
             await self.message_service.update_message_content(
@@ -200,6 +207,8 @@ class InternalLlmEventService:
         full_text = pending.get("full_text") or ""
         started_at = pending.get("started_at") or time.perf_counter()
         latency_ms = int((time.perf_counter() - started_at) * 1000)
+        GENERATION_FAILURES.labels(reason="llm_error").inc()
+        ANSWER_DURATION.labels(outcome="error").observe(latency_ms / 1000)
         async with SessionLocal() as db:
             await self.message_service.update_message_content(
                 db,

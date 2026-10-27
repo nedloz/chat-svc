@@ -6,3 +6,5 @@ redis==5.2.1
 httpx==0.28.1
 pydantic==2.10.6
 pydantic-settings==2.7.1
+prometheus-client==0.21.1
+prometheus-fastapi-instrumentator==7.0.0

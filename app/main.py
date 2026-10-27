@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 
+from app.metrics import setup_metrics
 from app.core.config import settings
 from app import user_context
 from app.core.internal_auth import validate_internal_auth_mode, verify_internal_websocket
@@ -24,6 +25,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+setup_metrics(app)
 
 
 @app.get("/healthz")

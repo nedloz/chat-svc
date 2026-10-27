@@ -2,6 +2,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.metrics import MESSAGES
 from app.db.repositories.message_repo import MessageRepository
 from app.db.repositories.session_repo import SessionRepository
 from app.services.redis_cache import RedisCacheService
@@ -34,6 +35,7 @@ class MessageService:
         )
         await session_repo.update_last_message(session_id, message.id, message.created_at)
         await db.commit()
+        MESSAGES.labels(role=role).inc()
         serialized = await message_repo.serialize(message)
         await self.cache.append_recent_message(session_id, serialized)
         return message, serialized

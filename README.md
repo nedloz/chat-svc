@@ -1139,3 +1139,18 @@ nginx пробрасывает его вместо заголовков, а се
 политикой «кто что может» (`main/infra/mtls`). Модуль одинаков в chat-svc, db-svc,
 graph-rag-svc и ingest-worker, менять его нужно во всех сразу. Включение и проверка —
 `main/infra/pki/README.md`, раздел «mTLS между сервисами».
+
+## Метрики
+
+`GET /metrics` отдаёт Prometheus (за mTLS - только пользователю `prometheus`, политика в `infra/mtls/chat-svc.conf`). Кроме HTTP-метрик (`http_requests_total`, `http_request_duration_seconds`, `http_requests_inprogress`; метка `handler` - шаблон маршрута) сервис отдаёт бизнес-метрики с префиксом `pochemuchnik_`. Код: `app/metrics.py`, тесты: `tests/`. Общая картина и дашборды - `infra/observability/README.md` в корневом репозитории.
+
+| Метрика | Что считает |
+| :-- | :-- |
+| `ws_connections_active`, `ws_connections_total` | открытые и установленные WebSocket-соединения пользователей |
+| `messages_total{role}` | созданные сообщения (`user`, `assistant`) |
+| `time_to_first_token_seconds` | от вопроса до первого фрагмента ответа |
+| `answer_duration_seconds{outcome}` | полное время ответа: `completed`, `cancelled`, `error` |
+| `generation_failures_total{reason}` | `llm_error` (graph-rag-svc прислал `message_error`), `internal_error` (сбой обработки события) |
+| `feedback_total{value}` | оценки: `positive`, `negative`, `neutral` |
+| `redis_cache_requests_total{kind,outcome}` | кэш Redis: `profile`, `session`, `recent_messages`; `hit` / `miss` |
+

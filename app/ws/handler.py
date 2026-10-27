@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import user_context
+from app.metrics import WS_CONNECTIONS_ACTIVE, WS_CONNECTIONS_TOTAL
 from app.core.config import settings
 from app.db.repositories.message_repo import MessageRepository
 from app.db.session import SessionLocal
@@ -64,6 +65,8 @@ class ChatWebSocketHandler:
             }
         )
 
+        WS_CONNECTIONS_TOTAL.inc()
+        WS_CONNECTIONS_ACTIVE.inc()
         try:
             while True:
                 payload = await websocket.receive_json()
@@ -159,6 +162,7 @@ class ChatWebSocketHandler:
         except WebSocketDisconnect:
             logger.info("websocket disconnected: user_id=%s session_id=%s", resolved_user_id, session_id)
         finally:
+            WS_CONNECTIONS_ACTIVE.dec()
             manager.disconnect(session_id, connection_id)
             with suppress(Exception):
                 await self.cache.unregister_connection(connection_id, session_id)
